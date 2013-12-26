@@ -22,7 +22,7 @@ def csvToCouchdb(csvName, couchdbName, delPrev):
     csvDict = csv.DictReader(open(csvName, 'r'), delimiter=',', quotechar='"')
     dataList = [entry for entry in csvDict]
     # get server
-    server = couchdb.Server()
+    server = couchdb.Server('http://192.168.1.106:5984/')
 
     if couchdbName not in server:
         db = server.create(couchdbName)
