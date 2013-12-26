@@ -90,7 +90,7 @@ def findMaxClass(output):
 
     return maxTypeInCategory
 
-#maxIterations = 1000
+maxIterations = 1000
 
 def svmClassify(dbname):
     totalTypes, typeMap = readVariablesInMap()
@@ -99,7 +99,7 @@ def svmClassify(dbname):
     for t, f in typeMap.iteritems():
         featureList[t] = len(f)
 
-    #print 'Opening couchdb named ' + dbname
+    print 'Opening couchdb named ' + dbname
     couch = couchdb.Server('http://192.168.1.106:5984/')
     db = couch[dbname]
 
@@ -119,15 +119,15 @@ def svmClassify(dbname):
 
         samples.append(extractFeatures(tweetText))
         sampleLabels.append(tweetLabels)
-        #if count > maxIterations:
-        #    break
-        #count += 1
+#        if count > maxIterations:
+#            break
+#        count += 1
 
     svms = {}
 
     for labelType in totalTypes:
-        #print "training svm for label ", str(i)
-        clf = svm.SVC(class_weight='auto')
+        print "training svm for label ", str(labelType)
+        clf = svm.LinearSVC(class_weight='auto')
 
         if not noSamplesHaveThisLabel(sampleLabels, labelType):
             thisSampleLabel = getSampleLabels(sampleLabels, labelType)
@@ -160,9 +160,9 @@ def svmClassify(dbname):
         for category, labelsInCategory in typeMap.iteritems():
             print category + ' = ' + labelsInCategory[maxInEachCategory[category]] + ' '
 
-        #if ctr > 100:
-        #    break
-        #ctr += 1
+        if ctr > 1000:
+            break
+        ctr += 1
 
 
 
