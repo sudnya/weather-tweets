@@ -7,9 +7,13 @@
 import sys
 import argparse
 import couchdb
+
+from sklearn.feature_extraction.text import CountVectorizer
 from sklearn import svm
+from sklearn import naive_bayes
 
-
+maxTrainingIterations = 80000
+maxTestIterations = maxTrainingIterations/10
 
 def readVariablesInMap():
     types = []
@@ -39,7 +43,18 @@ def extractLabels(document, featureList):
 def standardize(character):
     return (float(ord(character)) / 127.0) - 1.0
 
-def extractFeatures(text):
+def generateFeatureExtractor(corpus):
+    featureExtractor = CountVectorizer()
+    featureExtractor.fit(corpus)
+    return featureExtractor
+
+
+def extractFeatures(featureExtractor, samples):
+    features = featureExtractor.transform(samples)
+    #print "Extracted features: ", features, " from tweet text: ", text
+    return features
+
+def extractRawFeatures(text):
     features = []
     for i in text:
         features.append(standardize(i))
@@ -90,7 +105,15 @@ def findMaxClass(output):
 
     return maxTypeInCategory
 
-maxIterations = 1000
+classesInOrder = [ 's1','s2','s3','s4','s5','w1','w2','w3','w4','k1','k2','k3','k4','k5','k6','k7','k8','k9','k10','k11','k12','k13','k14','k15']
+
+def writeTweetPrediction(outputFile, id, tweetClassifications):
+    resultString = str(id)
+
+    for possibleClass in classesInOrder:
+        resultString += "," + str(tweetClassifications[possibleClass])
+
+    outputFile.write(resultString + "\n")
 
 def svmClassify(dbname):
     totalTypes, typeMap = readVariablesInMap()
@@ -110,20 +133,25 @@ def svmClassify(dbname):
     sampleLabels = []
 
     count = 0
-    for id in db:
+    for tweet in db.iterview('_all_docs', maxTrainingIterations, include_docs=True):
         # x (features)
-        tweetText = db[id]['tweet']
+        tweetText = tweet.doc['tweet']
 
         # y class labels (1 hot encoded)
-        tweetLabels = extractLabels(db[id], featureList)
+        tweetLabels = extractLabels(tweet.doc, featureList)
 
-        samples.append(extractFeatures(tweetText))
+        samples.append(tweetText)
         sampleLabels.append(tweetLabels)
-#        if count > maxIterations:
-#            break
-#        count += 1
+        if count > maxTrainingIterations:
+            break
+        count += 1
+
+    # geneate feature selector
+    featureExtractor = generateFeatureExtractor(samples)
 
     svms = {}
+
+    sparseSamples = extractFeatures(featureExtractor, samples)
 
     for labelType in totalTypes:
         print "training svm for label ", str(labelType)
@@ -132,10 +160,51 @@ def svmClassify(dbname):
         if not noSamplesHaveThisLabel(sampleLabels, labelType):
             thisSampleLabel = getSampleLabels(sampleLabels, labelType)
             #print thisSampleLabel
-            clf.fit(samples, thisSampleLabel)
+            clf.fit(sparseSamples, thisSampleLabel)
             svms[labelType] = clf
         else:
             svms[labelType] = None
+
+
+    #cross validate
+    cvDbName = 'cross-validation-tweets' 
+    cvDb = couch[cvDbName]
+    ctr = 0
+    
+    matches = 0
+    totalSamples = 0
+    
+    for i in cvDb.iterview('_all_docs', maxTrainingIterations, include_docs=True):
+        cvTweet = i.doc['tweet']
+        cvSample = extractFeatures(featureExtractor, [cvTweet])
+        #print 'Feeding in testSample of ' + str(testSample)
+        outputs = {}
+        for label, currSvm in svms.iteritems():
+            if currSvm != None:
+                #print 'Current SVM = ' + str(currSvm.support_vectors_)
+                current = currSvm.predict(cvSample)
+                #print 'Non-zero feature predicted : ' + str(current)
+                outputs[label] = current[0]
+            else:
+                outputs[label] = 0.0
+        maxInEachCategory = findMaxClass(outputs)
+
+        #print cvTweet
+        for category, labelsInCategory in typeMap.iteritems():
+            #print category + ' = ' + labelsInCategory[maxInEachCategory[category]] + ' '
+            
+            if float(i.doc[maxInEachCategory[category]]) > 0.0:
+                matches += 1
+            
+            totalSamples += 1
+
+        if ctr > maxTrainingIterations:
+            break
+        ctr += 1
+
+    outputFile = open('submission.csv', 'w')
+
+    outputFile.write('id,s1,s2,s3,s4,s5,w1,w2,w3,w4,k1,k2,k3,k4,k5,k6,k7,k8,k9,k10,k11,k12,k13,k14,k15\n')
 
     #test
     testDbName = 'test-tweets' 
@@ -143,37 +212,49 @@ def svmClassify(dbname):
     ctr = 0
     for i in testDb:
         testTweet = testDb[i]['tweet']
-        testSample = extractFeatures(testTweet)
+        testSample = extractFeatures(featureExtractor, [testTweet])
         #print 'Feeding in testSample of ' + str(testSample)
         outputs = {}
         for label, currSvm in svms.iteritems():
             if currSvm != None:
                 #print 'Current SVM = ' + str(currSvm.support_vectors_)
-                current = currSvm.predict([testSample])
+                current = currSvm.predict(testSample)
                 #print 'Non-zero feature predicted : ' + str(current)
                 outputs[label] = current[0]
             else:
                 outputs[label] = 0.0
         maxInEachCategory = findMaxClass(outputs)
 
-        print testTweet
-        for category, labelsInCategory in typeMap.iteritems():
-            print category + ' = ' + labelsInCategory[maxInEachCategory[category]] + ' '
+        writeTweetPrediction(outputFile, testDb[i]['id'], outputs)
 
-        if ctr > 1000:
+        shouldPrint = True
+        if ctr > maxTestIterations:
+            shouldPrint = False
             break
         ctr += 1
 
+        if shouldPrint:
+            print testTweet
+        for category, labelsInCategory in typeMap.iteritems():
+            if shouldPrint:
+                print category + ' = ' + labelsInCategory[maxInEachCategory[category]] + ' '
+
+
+
+    print "Cross validation accuracy: ", str((matches * 100.0) / totalSamples)
+    print "Cross validation RMSE:     ????"
 
 
 
 def main():
     parser = argparse.ArgumentParser(description="Process commandline inputs")
     parser.add_argument('-db',     help="name of the database which contains training data", type=str)
-    parser.add_argument('-method', help="the machine learning method/algorithm to invoke",   type=str)
+    parser.add_argument('-method', help="the machine learning method/algorithm to invoke. Currently supports: svm, naive-bayes",   type=str)
     args = parser.parse_args()
     if (args.method == "svm"):
         svmClassify(args.db);
+#    if (args.method == "naive-bayes"):
+#        bayesClassify(args.db);
 
 if __name__ == '__main__':
     main()
