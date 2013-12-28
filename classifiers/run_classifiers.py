@@ -7,12 +7,14 @@
 import sys
 import argparse
 import couchdb
-
-from sklearn.feature_extraction.text import CountVectorizer
+from math import sqrt
 from sklearn import svm
+from sklearn.metrics import mean_squared_error
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-maxTrainingIterations = 800
-maxTestIterations = maxTrainingIterations/10
+maxTrainingIterations = 100000
+maxTestIterations = 100000 #maxTrainingIterations/10
 
 # reads in the feature schema from the variables.txt - assume there are multiple categories and each category has many classes
 def readVariablesInMap():
@@ -50,7 +52,7 @@ def standardize(character):
 
 # creates a feature extractor that will generate the features from samples (instead of char->float)
 def generateFeatureExtractor(corpus):
-    featureExtractor = CountVectorizer()
+    featureExtractor = TfidfVectorizer(max_features=None)# CountVectorizer()
     featureExtractor.fit(corpus)
     return featureExtractor
 
@@ -92,7 +94,8 @@ def noSamplesHaveThisLabel(sampleLabels, i):
 
 
 
-# which class in a specified category has most confidence
+# which class in a specified category has most confidence - should get rid of this eventually since we eventually would 
+# like to know confidence values for each class in each category
 def findMaxClass(output):
     maxInCategories = {}
     maxTypeInCategory = {}
@@ -120,6 +123,36 @@ def writeTweetPrediction(outputFile, id, tweetClassifications):
 
 
 
+# handles cross validate set - running on SVM, calculating Root mean sqr error calculation
+def crossValidate(cvDb, maxIterations, featureExtractor, svms, typeMap):
+    ctr = 0
+    matches = 0
+    totalSamples = 0
+    predictedOutputs = []
+    expectedOutputs = []
+    
+    for i in cvDb.iterview('_all_docs', maxIterations, include_docs=True):
+        cvTweet = i.doc['tweet']
+        cvTweet += i.doc['state']
+        cvTweet += i.doc['location']
+
+        cvSample = extractFeatures(featureExtractor, [cvTweet])
+
+        for label, currSvm in svms.iteritems():
+            if currSvm != None:
+                current = currSvm.predict(cvSample)
+                predictedOutputs.append(current[0])
+            else:
+                predictedOutputs.append(0.0)
+            
+            yRef = float(i.doc[label])
+            expectedOutputs.append(yRef)
+        if ctr > maxIterations:
+            break
+        ctr += 1
+    print "Mean squared error = ", sqrt(mean_squared_error(expectedOutputs, predictedOutputs))
+
+
 # open couchdb at a given IP:port - change this as per your machine
 def openDb():
     couch = couchdb.Server('http://192.168.1.106:5984/')
@@ -127,8 +160,35 @@ def openDb():
 
 
 
+def test(testDb, maxTestIterations, featureExtractor, svms, typeMap, outputFileName):
+    outputFile = open(outputFileName, 'w')
+    outputFile.write('id,s1,s2,s3,s4,s5,w1,w2,w3,w4,k1,k2,k3,k4,k5,k6,k7,k8,k9,k10,k11,k12,k13,k14,k15\n')
+    ctr = 0
+    for i in testDb:
+        testTweet = testDb[i]['tweet']
+        testTweet += testDb[i]['state']
+        testTweet += testDb[i]['location']
+
+        testSample = extractFeatures(featureExtractor, [testTweet])
+        outputs = {}
+        for label, currSvm in svms.iteritems():
+            if currSvm != None:
+                current = currSvm.predict(testSample)
+                outputs[label] = current[0]
+            else:
+                outputs[label] = 0.0
+        maxInEachCategory = findMaxClass(outputs)
+        writeTweetPrediction(outputFile, testDb[i]['id'], outputs)
+        shouldPrint = True
+        if ctr > maxTestIterations:
+            shouldPrint = False
+            break
+        ctr += 1
+
+
+
 # classfier function
-def classify(dbname, method):
+def classify(dbname, method, outputFileName):
     totalTypes, typeMap = readVariablesInMap()
     featureList = {}
     for t, f in typeMap.iteritems():
@@ -146,6 +206,8 @@ def classify(dbname, method):
     for tweet in db.iterview('_all_docs', maxTrainingIterations, include_docs=True):
         # x (features)
         tweetText = tweet.doc['tweet']
+        tweetText += tweet.doc['state']
+        tweetText += tweet.doc['location']
         # y class labels (1 hot encoded)
         tweetLabels = extractLabels(tweet.doc, featureList)
         samples.append(tweetText)
@@ -173,74 +235,21 @@ def classify(dbname, method):
 
 
     #cross validate
-    cvDbName = 'cross-validation-tweets' 
-    cvDb = couch[cvDbName]
-    ctr = 0
-    matches = 0
-    totalSamples = 0
-    
-    for i in cvDb.iterview('_all_docs', maxTrainingIterations, include_docs=True):
-        cvTweet = i.doc['tweet']
-        cvSample = extractFeatures(featureExtractor, [cvTweet])
-        outputs = {}
-        for label, currSvm in svms.iteritems():
-            if currSvm != None:
-                current = currSvm.predict(cvSample)
-                outputs[label] = current[0]
-            else:
-                outputs[label] = 0.0
-        maxInEachCategory = findMaxClass(outputs)
+    cvDb = couch['cross-validation-tweets']
+    crossValidate(cvDb, maxTestIterations, featureExtractor, svms, typeMap)
 
-        for category, labelsInCategory in typeMap.iteritems():
-            if float(i.doc[maxInEachCategory[category]]) > 0.0:
-                matches += 1
-            totalSamples += 1
-        if ctr > maxTrainingIterations:
-            break
-        ctr += 1
-
-
-    outputFile = open('submission.csv', 'w')
-    outputFile.write('id,s1,s2,s3,s4,s5,w1,w2,w3,w4,k1,k2,k3,k4,k5,k6,k7,k8,k9,k10,k11,k12,k13,k14,k15\n')
-    #test
-    testDbName = 'test-tweets' 
-    testDb = couch[testDbName]
-    ctr = 0
-    for i in testDb:
-        testTweet = testDb[i]['tweet']
-        testSample = extractFeatures(featureExtractor, [testTweet])
-        outputs = {}
-        for label, currSvm in svms.iteritems():
-            if currSvm != None:
-                current = currSvm.predict(testSample)
-                outputs[label] = current[0]
-            else:
-                outputs[label] = 0.0
-        maxInEachCategory = findMaxClass(outputs)
-        writeTweetPrediction(outputFile, testDb[i]['id'], outputs)
-        shouldPrint = True
-        if ctr > maxTestIterations:
-            shouldPrint = False
-            break
-        ctr += 1
-
-        if shouldPrint:
-            print testTweet
-        for category, labelsInCategory in typeMap.iteritems():
-            if shouldPrint:
-                print category + ' = ' + labelsInCategory[maxInEachCategory[category]] + ' '
-
-    print "Cross validation accuracy: ", str((matches * 100.0) / totalSamples)
-    print "Cross validation RMSE:     ????"
-
+    # run tests
+    testDb = couch['test-tweets']
+    test(testDb, maxTestIterations, featureExtractor, svms, typeMap, outputFileName)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Process commandline inputs")
     parser.add_argument('-db',     help="name of the database which contains training data", type=str)
     parser.add_argument('-method', help="the machine learning method/algorithm to invoke. Currently supports: svm, naive-bayes",   type=str)
+    parser.add_argument('-output', help="filename to which to write output of test data (will be filename.csv)", type=str)
     args = parser.parse_args()
-    classify(args.db, args.method);
+    classify(args.db, args.method, args.output);
 
 if __name__ == '__main__':
     main()
