@@ -13,8 +13,9 @@ from sklearn.metrics import mean_squared_error
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-maxTrainingIterations = 100000
-maxTestIterations = 100000 #maxTrainingIterations/10
+maxTrainingIterations = 1000
+maxCrossValidateIterations = 1000
+maxTestIterations = 1000000 #maxTrainingIterations/10
 
 # reads in the feature schema from the variables.txt - assume there are multiple categories and each category has many classes
 def readVariablesInMap():
@@ -44,15 +45,11 @@ def extractLabels(document, featureList):
     return labels
 
 
-# to re-baseline values between -1 and 1
-def standardize(character):
-    return (float(ord(character)) / 127.0) - 1.0
-
-
 
 # creates a feature extractor that will generate the features from samples (instead of char->float)
 def generateFeatureExtractor(corpus):
-    featureExtractor = TfidfVectorizer(max_features=None)# CountVectorizer()
+    #featureExtractor = TfidfVectorizer(max_features=None)# CountVectorizer()
+    featureExtractor = CountVectorizer()
     featureExtractor.fit(corpus)
     return featureExtractor
 
@@ -61,16 +58,6 @@ def generateFeatureExtractor(corpus):
 # converts text/image data into numeric feature usable by ML algorithms
 def extractFeatures(featureExtractor, samples):
     features = featureExtractor.transform(samples)
-    return features
-
-
-# this was written initially for a naive implementation that converted char->float as features
-def extractRawFeatures(text):
-    features = []
-    for i in text:
-        features.append(standardize(i))
-    while len(features) < 180:
-        features.append(0.0)
     return features
 
 
@@ -94,22 +81,22 @@ def noSamplesHaveThisLabel(sampleLabels, i):
 
 
 
-# which class in a specified category has most confidence - should get rid of this eventually since we eventually would 
-# like to know confidence values for each class in each category
-def findMaxClass(output):
-    maxInCategories = {}
-    maxTypeInCategory = {}
+# normalize the output for each category
+def normalizeOutput(classification):
+    sums = {}
+    for i, val in classification.iteritems():
+        if not i[0] in sums:
+            sums[i[0]] = 0
+        
+        sums[i[0]] += val
 
-    for label, value in output.iteritems():
-        if not label[0] in maxInCategories:
-            maxInCategories[label[0]] = value
-            maxTypeInCategory[label[0]] = label
-        elif value > maxInCategories[label[0]]:
-            maxInCategories[label[0]] = value
-            maxTypeInCategory[label[0]] = label
-    return maxTypeInCategory
+    for key, val in classification.iteritems():
+        if sums[key[0]] == 0.0:
+            classification[key] = 0.0
+        else:
+            classification[key] = val/sums[key[0]]
 
-
+    return classification
 
 # to write output as expected by kaggle's sample submission format
 classesInOrder = [ 's1','s2','s3','s4','s5','w1','w2','w3','w4','k1','k2','k3','k4','k5','k6','k7','k8','k9','k10','k11','k12','k13','k14','k15']
@@ -135,18 +122,25 @@ def crossValidate(cvDb, maxIterations, featureExtractor, svms, typeMap):
         cvTweet = i.doc['tweet']
         cvTweet += i.doc['state']
         cvTweet += i.doc['location']
+        outputs = {}
 
         cvSample = extractFeatures(featureExtractor, [cvTweet])
 
         for label, currSvm in svms.iteritems():
             if currSvm != None:
                 current = currSvm.predict(cvSample)
-                predictedOutputs.append(current[0])
+                outputs[label] = current[0]
+                #predictedOutputs.append(current[0])
             else:
-                predictedOutputs.append(0.0)
+                outputs[label] = 0.0
+                #predictedOutputs.append(0.0)
+        
             
             yRef = float(i.doc[label])
             expectedOutputs.append(yRef)
+
+        outputs = normalizeOutput(outputs)
+        predictedOutputs += [outputs[label] for label, svm in svms.iteritems()]
         if ctr > maxIterations:
             break
         ctr += 1
@@ -164,10 +158,10 @@ def test(testDb, maxTestIterations, featureExtractor, svms, typeMap, outputFileN
     outputFile = open(outputFileName, 'w')
     outputFile.write('id,s1,s2,s3,s4,s5,w1,w2,w3,w4,k1,k2,k3,k4,k5,k6,k7,k8,k9,k10,k11,k12,k13,k14,k15\n')
     ctr = 0
-    for i in testDb:
-        testTweet = testDb[i]['tweet']
-        testTweet += testDb[i]['state']
-        testTweet += testDb[i]['location']
+    for i in testDb.iterview('_all_docs', maxTestIterations, include_docs=True):
+        testTweet = i.doc['tweet']
+        testTweet += i.doc['state']
+        testTweet += i.doc['location']
 
         testSample = extractFeatures(featureExtractor, [testTweet])
         outputs = {}
@@ -177,8 +171,9 @@ def test(testDb, maxTestIterations, featureExtractor, svms, typeMap, outputFileN
                 outputs[label] = current[0]
             else:
                 outputs[label] = 0.0
-        maxInEachCategory = findMaxClass(outputs)
-        writeTweetPrediction(outputFile, testDb[i]['id'], outputs)
+        #maxInEachCategory = findMaxClass(outputs)
+        outputs = normalizeOutput(outputs)
+        writeTweetPrediction(outputFile, i.doc['id'], outputs)
         shouldPrint = True
         if ctr > maxTestIterations:
             shouldPrint = False
@@ -188,7 +183,7 @@ def test(testDb, maxTestIterations, featureExtractor, svms, typeMap, outputFileN
 
 
 # classfier function
-def classify(dbname, method, outputFileName):
+def classify(dbname, method, outputFileName, trainingIterations):
     totalTypes, typeMap = readVariablesInMap()
     featureList = {}
     for t, f in typeMap.iteritems():
@@ -203,7 +198,7 @@ def classify(dbname, method, outputFileName):
     sampleLabels = []
     count = 0
 
-    for tweet in db.iterview('_all_docs', maxTrainingIterations, include_docs=True):
+    for tweet in db.iterview('_all_docs', trainingIterations, include_docs=True):
         # x (features)
         tweetText = tweet.doc['tweet']
         tweetText += tweet.doc['state']
@@ -212,7 +207,7 @@ def classify(dbname, method, outputFileName):
         tweetLabels = extractLabels(tweet.doc, featureList)
         samples.append(tweetText)
         sampleLabels.append(tweetLabels)
-        if count > maxTrainingIterations:
+        if count > trainingIterations:
             break
         count += 1
 
@@ -224,7 +219,7 @@ def classify(dbname, method, outputFileName):
 
     for labelType in totalTypes:
         print "Training svm for label ", str(labelType)
-        clf = svm.LinearSVC(class_weight='auto')
+        clf = svm.LinearSVC(class_weight='auto', C=20.0)
         if not noSamplesHaveThisLabel(sampleLabels, labelType):
             thisSampleLabel = getSampleLabels(sampleLabels, labelType)
             clf.fit(sparseSamples, thisSampleLabel)
@@ -236,7 +231,7 @@ def classify(dbname, method, outputFileName):
 
     #cross validate
     cvDb = couch['cross-validation-tweets']
-    crossValidate(cvDb, maxTestIterations, featureExtractor, svms, typeMap)
+    crossValidate(cvDb, maxCrossValidateIterations, featureExtractor, svms, typeMap)
 
     # run tests
     testDb = couch['test-tweets']
@@ -248,8 +243,9 @@ def main():
     parser.add_argument('-db',     help="name of the database which contains training data", type=str)
     parser.add_argument('-method', help="the machine learning method/algorithm to invoke. Currently supports: svm, naive-bayes",   type=str)
     parser.add_argument('-output', help="filename to which to write output of test data (will be filename.csv)", type=str)
+    parser.add_argument('-training_iterations', help="The number of training iterations", type=int, default=maxTrainingIterations)
     args = parser.parse_args()
-    classify(args.db, args.method, args.output);
+    classify(args.db, args.method, args.output, args.training_iterations);
 
 if __name__ == '__main__':
     main()
