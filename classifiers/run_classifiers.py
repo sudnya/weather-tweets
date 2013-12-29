@@ -12,10 +12,26 @@ from sklearn import svm
 from sklearn.metrics import mean_squared_error
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import MiniBatchKMeans
+from sklearn import preprocessing
+from scipy.sparse import hstack
+from scipy.sparse import csr_matrix
+
+sys.path.append("/Library/Frameworks/Python.framework/Versions/2.7/lib/python2.7/site-packages")
+from nltk import word_tokenize          
+from nltk.stem import WordNetLemmatizer 
 
 maxTrainingIterations = 1000
 maxCrossValidateIterations = 1000
 maxTestIterations = 1000000 #maxTrainingIterations/10
+
+maxClusters = 30
+
+class LemmaTokenizer(object):
+    def __init__(self):
+        self.wnl = WordNetLemmatizer()
+    def __call__(self, doc):
+        return [self.wnl.lemmatize(t) for t in word_tokenize(doc)]
 
 # reads in the feature schema from the variables.txt - assume there are multiple categories and each category has many classes
 def readVariablesInMap():
@@ -49,16 +65,37 @@ def extractLabels(document, featureList):
 # creates a feature extractor that will generate the features from samples (instead of char->float)
 def generateFeatureExtractor(corpus):
     #featureExtractor = TfidfVectorizer(max_features=None)# CountVectorizer()
+    #featureExtractor = CountVectorizer(tokenizer=LemmaTokenizer())#CountVectorizer()
     featureExtractor = CountVectorizer()
     featureExtractor.fit(corpus)
-    return featureExtractor
+    
+    features = featureExtractor.transform(corpus)
+
+    clusterExtractor = MiniBatchKMeans(n_clusters=maxClusters)
+    clusterExtractor.fit(features)
+
+    scaler = preprocessing.StandardScaler()
+
+    clusters = clusterExtractor.transform(features)
+   
+    scaler.fit(clusters)
+
+    return (featureExtractor, clusterExtractor, scaler)
 
 
 
 # converts text/image data into numeric feature usable by ML algorithms
-def extractFeatures(featureExtractor, samples):
+def extractFeatures(model, samples):
+    (featureExtractor, clusterExtractor, scalar) = model
+
     features = featureExtractor.transform(samples)
-    return features
+    clusters = clusterExtractor.transform(features)
+
+    scaledClusters = csr_matrix(scalar.transform(clusters))
+
+    completeFeatures = hstack([features, scaledClusters])
+    
+    return completeFeatures
 
 
 
@@ -216,6 +253,8 @@ def classify(dbname, method, outputFileName, trainingIterations):
     featureExtractor = generateFeatureExtractor(samples)
     svms = {}
     sparseSamples = extractFeatures(featureExtractor, samples)
+
+    print "Total Feature Count: ", sparseSamples.shape[1]
 
     for labelType in totalTypes:
         print "Training svm for label ", str(labelType)
