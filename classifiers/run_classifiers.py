@@ -280,7 +280,7 @@ def classify(dbname, method, outputFileName, trainingIterations):
 def main():
     parser = argparse.ArgumentParser(description="Process commandline inputs")
     parser.add_argument('-db',     help="name of the database which contains training data", type=str)
-    parser.add_argument('-method', help="the machine learning method/algorithm to invoke. Currently supports: svm, naive-bayes",   type=str)
+    parser.add_argument('-method', help="the machine learning method/algorithm to invoke. Currently supports: svm", type=str)
     parser.add_argument('-output', help="filename to which to write output of test data (will be filename.csv)", type=str)
     parser.add_argument('-training_iterations', help="The number of training iterations", type=int, default=maxTrainingIterations)
     args = parser.parse_args()
